@@ -26,7 +26,12 @@ server/
 │   │   │   ├── auth.repository.ts         → CRUD users (SQLite)
 │   │   │   ├── auth.middleware.ts         → verifyJWT → req.user
 │   │   │   ├── auth.schema.ts             → zod validation: RegisterDTO, LoginDTO
-│   │   │   └── auth.types.ts              → UserRow, PublicUser, JwtPayload
+│   │   │   ├── auth.types.ts              → UserRow, PublicUser, JwtPayload
+│   │   │   └── models/
+│   │   │       ├── User.ts                → SQLite schema types & helpers
+│   │   │       └── migrations/
+│   │   │           ├── runner.ts          → executes migrations in order
+│   │   │           └── 001_create_users.ts
 │   │   │
 │   │   ├── library/                       📚 User's Library Management
 │   │   │   ├── library.routes.ts          → GET /api/library (filters, pagination)
@@ -36,8 +41,10 @@ server/
 │   │   │   ├── library.service.ts         → filters, validation, aggregations
 │   │   │   ├── library.repository.ts      → CRUD MongoDB + aggregations for stats
 │   │   │   ├── library.schema.ts          → zod: AddEntryDTO, UpdateEntryDTO
-│   │   │   └── library.types.ts           → ILibraryEntry, WatchStatus, LibraryFilters
-���   │   │
+│   │   │   ├── library.types.ts           → ILibraryEntry, WatchStatus, LibraryFilters
+│   │   │   └── models/
+│   │   │       └── LibraryEntry.ts        → MongoDB schema + interface
+│   │   │
 │   │   ├── stats/                         📊 User Statistics & Analytics
 │   │   │   ├── stats.routes.ts            → GET /api/stats/:userId (month breakdown, watch time)
 │   │   │   ├── stats.service.ts           → orchestration (calls library aggregations)
@@ -49,24 +56,15 @@ server/
 │   │   │   ├── lists.service.ts           → list operations, item reordering
 │   │   │   ├── lists.repository.ts        → CRUD MongoDB + reorder (drag & drop)
 │   │   │   ├── lists.schema.ts            → zod: CreateListDTO, ReorderItemsDTO
-│   │   │   └── lists.types.ts             → IThematicList, ListItem
+│   │   │   ├── lists.types.ts             → IThematicList, ListItem
+│   │   │   └── models/
+│   │   │       └── ThematicList.ts        → MongoDB schema + interface
 │   │   │
 │   │   └── shared/                        🔧 Shared Resources (cross-feature)
 │   │       ├── config/
 │   │       │   ├── sqlite.ts              → singleton DB connection + pragmas
 │   │       │   ├── mongo.ts               → mongoose.connect()
 │   │       │   └── env.ts                 → zod validation of .env
-│   │       │
-│   │       ├── models/
-│   │       │   ├── sqlite/
-│   │       │   │   ├── migrations/
-│   │       │   │   │   ├── runner.ts      → executes migrations in order
-│   │       │   │   │   └── 001_create_users.ts
-│   │       │   │   └── User.ts            → SQLite schema types & helpers
-│   │       │   │
-│   │       │   └── mongo/
-│   │       │       ├── LibraryEntry.ts    → schema + interface
-│   │       │       └── ThematicList.ts    → schema + interface
 │   │       │
 │   │       ├── middleware/
 │   │       │   ├── errorHandler.ts        → global Express error handler
@@ -109,28 +107,30 @@ Forbidden:
 
 ---
 
-## 4. Modèles SQLite — Users & Auth
+## 4. Feature: Auth — SQLite Models & Implementation
 
-### `src/shared/config/sqlite.ts`
+### `src/features/auth/models/User.ts`
 ```typescript
-import Database from 'better-sqlite3';
-import path from 'path';
+// Type qui reflète exactement la table SQLite
+export interface UserRow {
+  id: string;
+  username: string;
+  email: string;
+  password: string;       // hash bcrypt, jamais exposé
+  avatar_url: string | null;
+  bio: string;
+  is_private: 0 | 1;
+  created_at: string;
+  updated_at: string;
+}
 
-const DB_PATH = process.env.SQLITE_PATH ?? path.join(__dirname, '../../data/cinetrack.db');
-
-// Singleton — une seule connexion partagée
-const db = new Database(DB_PATH);
-
-// Performance : WAL mode pour les lectures concurrentes
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-
-export default db;
+// DTO sans le mot de passe — ce qu'on renvoie au client
+export type PublicUser = Omit<UserRow, 'password'>;
 ```
 
-### `src/shared/models/sqlite/migrations/001_create_users.ts`
+### `src/features/auth/models/migrations/001_create_users.ts`
 ```typescript
-import db from '../../../config/sqlite';
+import db from '../../../shared/config/sqlite';
 
 export function up(): void {
   db.exec(`
@@ -168,9 +168,9 @@ export function down(): void {
 }
 ```
 
-### `src/shared/models/sqlite/migrations/runner.ts`
+### `src/features/auth/models/migrations/runner.ts`
 ```typescript
-import db from '../../config/sqlite';
+import db from '../../../shared/config/sqlite';
 import { up as migration001 } from './001_create_users';
 
 // Table interne pour suivre les migrations appliquées
@@ -202,47 +202,200 @@ export function runMigrations(): void {
 }
 ```
 
-### `src/shared/models/sqlite/User.ts`
+### `src/features/auth/auth.types.ts`
 ```typescript
-// Type qui reflète exactement la table SQLite
-export interface UserRow {
-  id: string;
+import { PublicUser } from './models/User';
+
+export interface RegisterDTO {
   username: string;
   email: string;
-  password: string;       // hash bcrypt, jamais exposé
-  avatar_url: string | null;
-  bio: string;
-  is_private: 0 | 1;
-  created_at: string;
-  updated_at: string;
+  password: string;
 }
 
-// DTO sans le mot de passe — ce qu'on renvoie au client
-export type PublicUser = Omit<UserRow, 'password'>;
+export interface LoginDTO {
+  email: string;
+  password: string;
+}
+
+export interface AuthResponse {
+  user: PublicUser;
+  access_token: string;
+  refresh_token?: string;
+}
+
+export interface JwtPayload {
+  sub: string;
+  username: string;
+  email: string;
+  iat?: number;
+  exp?: number;
+}
 ```
 
----
-
-## 5. Modèles MongoDB — Library & Lists
-
-### `src/shared/config/mongo.ts`
+### `src/features/auth/auth.schema.ts`
 ```typescript
-import mongoose from 'mongoose';
+import { z } from 'zod';
 
-const MONGO_URI = process.env.MONGO_URI ?? 'mongodb://localhost:27017/cinetrack';
+export const RegisterSchema = z.object({
+  username: z.string().min(3).max(20),
+  email: z.string().email(),
+  password: z.string().min(8),
+});
 
-export async function connectMongo(): Promise<void> {
+export const LoginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
+});
+```
+
+### `src/features/auth/auth.repository.ts`
+```typescript
+import db from '../../shared/config/sqlite';
+import { UserRow, PublicUser } from './models/User';
+
+export const authRepository = {
+  findByEmail(email: string): UserRow | undefined {
+    return db.prepare('SELECT * FROM users WHERE email = ?').get(email) as UserRow | undefined;
+  },
+
+  findByUsername(username: string): UserRow | undefined {
+    return db.prepare('SELECT * FROM users WHERE username = ?').get(username) as UserRow | undefined;
+  },
+
+  findById(id: string): UserRow | undefined {
+    return db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
+  },
+
+  create(id: string, username: string, email: string, passwordHash: string): UserRow {
+    db.prepare(`
+      INSERT INTO users (id, username, email, password)
+      VALUES (@id, @username, @email, @password)
+    `).run({ id, username, email, password: passwordHash });
+    return this.findById(id) as UserRow;
+  },
+
+  saveRefreshToken(userId: string, token: string, expiresAt: string): void {
+    db.prepare(`
+      INSERT INTO refresh_tokens (id, user_id, token, expires_at)
+      VALUES (lower(hex(randomblob(16))), @user_id, @token, @expires_at)
+    `).run({ user_id: userId, token, expires_at });
+  },
+
+  toPublic(user: UserRow): PublicUser {
+    const { password, ...publicUser } = user;
+    return publicUser;
+  },
+};
+```
+
+### `src/features/auth/auth.service.ts`
+```typescript
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import { v4 as uuidv4 } from 'uuid';
+import { authRepository } from './auth.repository';
+import { RegisterDTO, LoginDTO, JwtPayload } from './auth.types';
+
+export const authService = {
+  async register(data: RegisterDTO) {
+    const existing = authRepository.findByEmail(data.email);
+    if (existing) throw new Error('Email already registered');
+
+    const hash = bcrypt.hashSync(data.password, 10);
+    const id = uuidv4();
+    const user = authRepository.create(id, data.username, data.email, hash);
+    return authRepository.toPublic(user);
+  },
+
+  async login(data: LoginDTO) {
+    const user = authRepository.findByEmail(data.email);
+    if (!user || !bcrypt.compareSync(data.password, user.password)) {
+      throw new Error('Invalid credentials');
+    }
+
+    const payload: JwtPayload = {
+      sub: user.id,
+      username: user.username,
+      email: user.email,
+    };
+
+    const accessToken = jwt.sign(payload, process.env.JWT_SECRET!, {
+      expiresIn: process.env.JWT_EXPIRES_IN ?? '15m',
+    });
+
+    return { user: authRepository.toPublic(user), access_token: accessToken };
+  },
+};
+```
+
+### `src/features/auth/auth.middleware.ts`
+```typescript
+import { Request, Response, NextFunction } from 'express';
+import jwt from 'jsonwebtoken';
+import { JwtPayload } from './auth.types';
+
+export interface AuthRequest extends Request {
+  user?: {
+    id: string;
+    username: string;
+    email: string;
+  };
+}
+
+export function verifyJWT(req: AuthRequest, res: Response, next: NextFunction): void {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) {
+    res.status(401).json({ success: false, error: 'No token' });
+    return;
+  }
+
   try {
-    await mongoose.connect(MONGO_URI);
-    console.log('[mongo] Connected ✓');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as JwtPayload;
+    req.user = { id: decoded.sub, username: decoded.username, email: decoded.email };
+    next();
   } catch (err) {
-    console.error('[mongo] Connection failed:', err);
-    process.exit(1);
+    res.status(401).json({ success: false, error: 'Invalid token' });
   }
 }
 ```
 
-### `src/shared/models/mongo/LibraryEntry.ts`
+### `src/features/auth/auth.routes.ts`
+```typescript
+import express, { Request, Response } from 'express';
+import { authService } from './auth.service';
+import { verifyJWT } from './auth.middleware';
+import { LoginSchema, RegisterSchema } from './auth.schema';
+
+const router = express.Router();
+
+router.post('/register', async (req: Request, res: Response) => {
+  try {
+    const data = RegisterSchema.parse(req.body);
+    const user = await authService.register(data);
+    res.json({ success: true, data: user });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/login', async (req: Request, res: Response) => {
+  try {
+    const data = LoginSchema.parse(req.body);
+    const result = await authService.login(data);
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    res.status(401).json({ success: false, error: err.message });
+  }
+});
+
+export default router;
+```
+
+---
+
+## 5. Feature: Library — MongoDB Models & Implementation
+
+### `src/features/library/models/LibraryEntry.ts`
 ```typescript
 import { Schema, model, Document } from 'mongoose';
 
@@ -286,217 +439,9 @@ export interface ILibraryEntry extends Document {
 export const LibraryEntry = model<ILibraryEntry>('LibraryEntry', LibraryEntrySchema);
 ```
 
-### `src/shared/models/mongo/ThematicList.ts`
-```typescript
-import { Schema, model, Document } from 'mongoose';
-
-const ThematicListSchema = new Schema({
-  user_id:     { type: String, required: true, index: true },
-  title:       { type: String, required: true },
-  description: { type: String, default: '' },
-  is_public:   { type: Boolean, default: true },
-  items: [{
-    tmdb_id:    { type: Number, required: true },
-    title:      { type: String, required: true },
-    poster_path:{ type: String, default: null },
-    order:      { type: Number, required: true },
-  }],
-}, { timestamps: true });
-
-export interface IThematicList extends Document {
-  user_id: string;
-  title: string;
-  description: string;
-  is_public: boolean;
-  items: Array<{ tmdb_id: number; title: string; poster_path: string | null; order: number }>;
-}
-
-export const ThematicList = model<IThematicList>('ThematicList', ThematicListSchema);
-```
-
----
-
-## 6. Feature: Auth — Implementation Details
-
-### `src/features/auth/auth.types.ts`
-```typescript
-export interface RegisterDTO {
-  username: string;
-  email: string;
-  password: string;
-}
-
-export interface LoginDTO {
-  email: string;
-  password: string;
-}
-
-export interface AuthResponse {
-  user: PublicUser;
-  access_token: string;
-  refresh_token?: string;
-}
-```
-
-### `src/features/auth/auth.schema.ts`
-```typescript
-import { z } from 'zod';
-
-export const RegisterSchema = z.object({
-  username: z.string().min(3).max(20),
-  email: z.string().email(),
-  password: z.string().min(8),
-});
-
-export const LoginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
-});
-```
-
-### `src/features/auth/auth.middleware.ts`
-```typescript
-import { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
-import { AuthRequest, JwtPayload } from '../../shared/types';
-
-export function verifyJWT(req: AuthRequest, res: Response, next: NextFunction): void {
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) {
-    res.status(401).json({ success: false, error: 'No token' });
-    return;
-  }
-
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as JwtPayload;
-    req.user = { id: decoded.sub, username: decoded.username, email: decoded.email };
-    next();
-  } catch (err) {
-    res.status(401).json({ success: false, error: 'Invalid token' });
-  }
-}
-```
-
-### `src/features/auth/auth.repository.ts`
-```typescript
-import db from '../../shared/config/sqlite';
-import { UserRow, PublicUser } from '../../shared/models/sqlite/User';
-
-export const authRepository = {
-  findByEmail(email: string): UserRow | undefined {
-    return db.prepare('SELECT * FROM users WHERE email = ?').get(email) as UserRow | undefined;
-  },
-
-  findByUsername(username: string): UserRow | undefined {
-    return db.prepare('SELECT * FROM users WHERE username = ?').get(username) as UserRow | undefined;
-  },
-
-  findById(id: string): UserRow | undefined {
-    return db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
-  },
-
-  create(id: string, username: string, email: string, passwordHash: string): UserRow {
-    db.prepare(`
-      INSERT INTO users (id, username, email, password)
-      VALUES (@id, @username, @email, @password)
-    `).run({ id, username, email, password: passwordHash });
-    return this.findById(id) as UserRow;
-  },
-
-  saveRefreshToken(userId: string, token: string, expiresAt: string): void {
-    db.prepare(`
-      INSERT INTO refresh_tokens (id, user_id, token, expires_at)
-      VALUES (lower(hex(randomblob(16))), @user_id, @token, @expires_at)
-    `).run({ user_id: userId, token, expires_at });
-  },
-
-  toPublic(user: UserRow): PublicUser {
-    const { password, ...publicUser } = user;
-    return publicUser;
-  },
-};
-```
-
-### `src/features/auth/auth.service.ts`
-```typescript
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import { v4 as uuidv4 } from 'uuid';
-import { authRepository } from './auth.repository';
-import { RegisterDTO, LoginDTO } from './auth.types';
-import { JwtPayload } from '../../shared/types';
-
-export const authService = {
-  async register(data: RegisterDTO) {
-    const existing = authRepository.findByEmail(data.email);
-    if (existing) throw new Error('Email already registered');
-
-    const hash = bcrypt.hashSync(data.password, 10);
-    const id = uuidv4();
-    const user = authRepository.create(id, data.username, data.email, hash);
-    return authRepository.toPublic(user);
-  },
-
-  async login(data: LoginDTO) {
-    const user = authRepository.findByEmail(data.email);
-    if (!user || !bcrypt.compareSync(data.password, user.password)) {
-      throw new Error('Invalid credentials');
-    }
-
-    const payload: JwtPayload = {
-      sub: user.id,
-      username: user.username,
-      email: user.email,
-    };
-
-    const accessToken = jwt.sign(payload, process.env.JWT_SECRET!, {
-      expiresIn: process.env.JWT_EXPIRES_IN ?? '15m',
-    });
-
-    return { user: authRepository.toPublic(user), access_token: accessToken };
-  },
-};
-```
-
-### `src/features/auth/auth.routes.ts`
-```typescript
-import express, { Request, Response } from 'express';
-import { authService } from './auth.service';
-import { verifyJWT } from './auth.middleware';
-import { LoginSchema, RegisterSchema } from './auth.schema';
-
-const router = express.Router();
-
-router.post('/register', async (req: Request, res: Response) => {
-  try {
-    const data = RegisterSchema.parse(req.body);
-    const user = await authService.register(data);
-    res.json({ success: true, data: user });
-  } catch (err: any) {
-    res.status(400).json({ success: false, error: err.message });
-  }
-});
-
-router.post('/login', async (req: Request, res: Response) => {
-  try {
-    const data = LoginSchema.parse(req.body);
-    const result = await authService.login(data);
-    res.json({ success: true, data: result });
-  } catch (err: any) {
-    res.status(401).json({ success: false, error: err.message });
-  }
-});
-
-export default router;
-```
-
----
-
-## 7. Feature: Library — Implementation Details
-
 ### `src/features/library/library.types.ts`
 ```typescript
-export type WatchStatus = 'to_watch' | 'watching' | 'watched' | 'abandoned';
+import { WatchStatus } from './models/LibraryEntry';
 
 export interface LibraryFilters {
   status?: WatchStatus;
@@ -518,9 +463,31 @@ export interface UpdateEntryDTO {
 }
 ```
 
+### `src/features/library/library.schema.ts`
+```typescript
+import { z } from 'zod';
+
+export const AddEntrySchema = z.object({
+  tmdb_id: z.number(),
+  status: z.enum(['to_watch', 'watching', 'watched', 'abandoned']),
+  tmdb_data: z.object({
+    title: z.string(),
+    poster_path: z.string().optional(),
+    genres: z.array(z.string()).optional(),
+    runtime: z.number().optional(),
+  }),
+});
+
+export const UpdateEntrySchema = z.object({
+  status: z.enum(['to_watch', 'watching', 'watched', 'abandoned']).optional(),
+  rating: z.number().min(0).max(10).optional(),
+  review: z.string().optional(),
+});
+```
+
 ### `src/features/library/library.repository.ts`
 ```typescript
-import { LibraryEntry, ILibraryEntry } from '../../shared/models/mongo/LibraryEntry';
+import { LibraryEntry, ILibraryEntry } from './models/LibraryEntry';
 import { LibraryFilters } from './library.types';
 
 export const libraryRepository = {
@@ -568,12 +535,37 @@ export const libraryRepository = {
 };
 ```
 
+### `src/features/library/library.service.ts`
+```typescript
+import { libraryRepository } from './library.repository';
+import { AddEntryDTO, UpdateEntryDTO } from './library.types';
+
+export const libraryService = {
+  async getLibrary(userId: string, filters: any = {}) {
+    return libraryRepository.findByUser(userId, filters);
+  },
+
+  async addEntry(userId: string, data: AddEntryDTO) {
+    const existing = await libraryRepository.findOne(userId, data.tmdb_id);
+    if (existing) throw new Error('Film déjà dans la bibliothèque');
+    return libraryRepository.upsert(userId, data.tmdb_id, { ...data });
+  },
+
+  async updateEntry(userId: string, tmdbId: number, data: UpdateEntryDTO) {
+    return libraryRepository.upsert(userId, tmdbId, data);
+  },
+
+  async deleteEntry(userId: string, tmdbId: number) {
+    return libraryRepository.delete(userId, tmdbId);
+  },
+};
+```
+
 ### `src/features/library/library.routes.ts`
 ```typescript
-import express, { Request, Response } from 'express';
-import { verifyJWT } from '../auth/auth.middleware';
+import express, { Response } from 'express';
+import { verifyJWT, AuthRequest } from '../auth/auth.middleware';
 import { libraryService } from './library.service';
-import { AuthRequest } from '../../shared/types';
 
 const router = express.Router();
 
@@ -618,7 +610,7 @@ export default router;
 
 ---
 
-## 8. Feature: Stats — Implementation Details
+## 6. Feature: Stats — Implementation
 
 ### `src/features/stats/stats.types.ts`
 ```typescript
@@ -663,10 +655,9 @@ export const statsService = {
 
 ### `src/features/stats/stats.routes.ts`
 ```typescript
-import express, { Request, Response } from 'express';
-import { verifyJWT } from '../auth/auth.middleware';
+import express, { Response } from 'express';
+import { verifyJWT, AuthRequest } from '../auth/auth.middleware';
 import { statsService } from './stats.service';
-import { AuthRequest } from '../../shared/types';
 
 const router = express.Router();
 
@@ -684,7 +675,35 @@ export default router;
 
 ---
 
-## 9. Feature: Lists — Implementation Details
+## 7. Feature: Lists — MongoDB Models & Implementation
+
+### `src/features/lists/models/ThematicList.ts`
+```typescript
+import { Schema, model, Document } from 'mongoose';
+
+const ThematicListSchema = new Schema({
+  user_id:     { type: String, required: true, index: true },
+  title:       { type: String, required: true },
+  description: { type: String, default: '' },
+  is_public:   { type: Boolean, default: true },
+  items: [{
+    tmdb_id:    { type: Number, required: true },
+    title:      { type: String, required: true },
+    poster_path:{ type: String, default: null },
+    order:      { type: Number, required: true },
+  }],
+}, { timestamps: true });
+
+export interface IThematicList extends Document {
+  user_id: string;
+  title: string;
+  description: string;
+  is_public: boolean;
+  items: Array<{ tmdb_id: number; title: string; poster_path: string | null; order: number }>;
+}
+
+export const ThematicList = model<IThematicList>('ThematicList', ThematicListSchema);
+```
 
 ### `src/features/lists/lists.types.ts`
 ```typescript
@@ -708,7 +727,7 @@ export interface ReorderItemsDTO {
 
 ### `src/features/lists/lists.repository.ts`
 ```typescript
-import { ThematicList, IThematicList } from '../../shared/models/mongo/ThematicList';
+import { ThematicList, IThematicList } from './models/ThematicList';
 
 export const listsRepository = {
   async findByUser(userId: string) {
@@ -742,12 +761,34 @@ export const listsRepository = {
 };
 ```
 
+### `src/features/lists/lists.service.ts`
+```typescript
+import { listsRepository } from './lists.repository';
+
+export const listsService = {
+  async getLists(userId: string) {
+    return listsRepository.findByUser(userId);
+  },
+
+  async createList(userId: string, data: any) {
+    return listsRepository.create(userId, data);
+  },
+
+  async reorderItems(userId: string, listId: string, items: any[]) {
+    return listsRepository.reorder(userId, listId, items);
+  },
+
+  async deleteList(userId: string, listId: string) {
+    return listsRepository.delete(userId, listId);
+  },
+};
+```
+
 ### `src/features/lists/lists.routes.ts`
 ```typescript
-import express, { Request, Response } from 'express';
-import { verifyJWT } from '../auth/auth.middleware';
+import express, { Response } from 'express';
+import { verifyJWT, AuthRequest } from '../auth/auth.middleware';
 import { listsService } from './lists.service';
-import { AuthRequest } from '../../shared/types';
 
 const router = express.Router();
 
@@ -792,32 +833,47 @@ export default router;
 
 ---
 
-## 10. Shared Types & Entry Point
+## 8. Shared Configuration & Types
+
+### `src/shared/config/sqlite.ts`
+```typescript
+import Database from 'better-sqlite3';
+import path from 'path';
+
+const DB_PATH = process.env.SQLITE_PATH ?? path.join(__dirname, '../../data/cinetrack.db');
+
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
+export default db;
+```
+
+### `src/shared/config/mongo.ts`
+```typescript
+import mongoose from 'mongoose';
+
+const MONGO_URI = process.env.MONGO_URI ?? 'mongodb://localhost:27017/cinetrack';
+
+export async function connectMongo(): Promise<void> {
+  try {
+    await mongoose.connect(MONGO_URI);
+    console.log('[mongo] Connected ✓');
+  } catch (err) {
+    console.error('[mongo] Connection failed:', err);
+    process.exit(1);
+  }
+}
+```
 
 ### `src/shared/types.ts`
 ```typescript
 import { Request } from 'express';
 
-export interface AuthRequest extends Request {
-  user?: {
-    id: string;
-    username: string;
-    email: string;
-  };
-}
-
 export interface ApiResponse<T = unknown> {
   success: boolean;
   data?: T;
   error?: string;
-}
-
-export interface JwtPayload {
-  sub: string;
-  username: string;
-  email: string;
-  iat?: number;
-  exp?: number;
 }
 ```
 
@@ -830,6 +886,10 @@ export function errorHandler(err: Error, req: Request, res: Response, next: Next
   res.status(500).json({ success: false, error: err.message ?? 'Internal server error' });
 }
 ```
+
+---
+
+## 9. Router & Entry Point
 
 ### `src/router/index.ts`
 ```typescript
@@ -853,7 +913,7 @@ export default router;
 ```typescript
 import express from 'express';
 import cors from 'cors';
-import { runMigrations } from './shared/models/sqlite/migrations/runner';
+import { runMigrations } from './features/auth/models/migrations/runner';
 import { connectMongo } from './shared/config/mongo';
 import { errorHandler } from './shared/middleware/errorHandler';
 import router from './router';
@@ -885,7 +945,7 @@ bootstrap().catch(console.error);
 
 ---
 
-## 11. Variables d'environnement
+## 10. Variables d'environnement
 
 ### `.env.example`
 ```env
@@ -908,9 +968,20 @@ PORT=3000
 CLIENT_URL=http://localhost:5173
 ```
 
+### `.gitignore`
+```
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+node_modules/
+dist/
+```
+
 ---
 
-## 12. Dépendances à installer
+## 11. Dépendances à installer
 
 ```bash
 cd server
@@ -920,7 +991,7 @@ npm install -D @types/express @types/better-sqlite3 @types/bcryptjs @types/jsonw
 
 ---
 
-## 13. Seed Migration Strategy
+## 12. Seed Migration Strategy
 
 ### `src/seed/migrate-seed.ts`
 ```typescript
@@ -931,7 +1002,7 @@ npm install -D @types/express @types/better-sqlite3 @types/bcryptjs @types/jsonw
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import db from '../shared/config/sqlite';
-import { runMigrations } from '../shared/models/sqlite/migrations/runner';
+import { runMigrations } from '../features/auth/models/migrations/runner';
 
 const SEED_USERS = [
   { username: 'alice',   email: 'alice@example.com',   password: 'password123' },
@@ -963,35 +1034,26 @@ async function migrate() {
 migrate().catch(err => { console.error('[seed] Error:', err); process.exit(1); });
 ```
 
-### `.gitignore`
-```
-data/
-*.db
-*.db-wal
-*.db-shm
-.env
-node_modules/
-dist/
-```
-
 ---
 
-## 14. Checklist — Week 1
+## 13. Checklist — Week 1
 
 - [ ] Create folder structure (features/*, shared/*)
-- [ ] Implement `shared/config/` (SQLite, MongoDB, env validation)
-- [ ] Write & test `shared/models/sqlite/migrations/001_create_users`
-- [ ] Implement `features/auth/` (all files: types, schema, repository, service, middleware, routes)
+- [ ] Implement `shared/config/` (SQLite, MongoDB)
+- [ ] Create `features/auth/models/` with User types & migrations
+- [ ] Implement `features/auth/` (repository, service, middleware, routes)
 - [ ] Run `migrate-seed.ts` to import mock users
-- [ ] Implement `features/library/` (types, repository, service, routes)
-- [ ] Implement `features/stats/` (types, service, routes)
-- [ ] Implement `features/lists/` (types, repository, service, routes)
+- [ ] Create `features/library/models/LibraryEntry.ts` (MongoDB schema)
+- [ ] Implement `features/library/` (repository, service, routes)
+- [ ] Create `features/lists/models/ThematicList.ts` (MongoDB schema)
+- [ ] Implement `features/lists/` (repository, service, routes)
+- [ ] Implement `features/stats/` (service, routes)
 - [ ] Test manually: register → login → JWT → protected routes
 - [ ] Open PR: `feat/backend-db-setup`
 
 ---
 
-## 15. API Routes Summary
+## 14. API Routes Summary
 
 ```
 POST   /api/auth/register          → Create account
